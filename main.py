@@ -46,22 +46,28 @@ def setup_keys():
 create_table()
 setup_keys()
 
-def sign_jwt(payload, secret, algorithm="HS256"):
-    return jwt.encode(payload, secret, algorithm=algorithm)
+def sign_jwt(payload, kid, algorithm="RS256"):
+    with sqlite3.connect(DATABASE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT key FROM keys WHERE kid = ?", (kid,))
+        key_row = cursor.fetchone()
+        
+        if key_row is None:
+            raise Exception("Key ID not found")
+        
+        pem_private_key = key_row[0]
+        private_key = serialization.load_pem_private_key(pem_private_key, password=None)
+        return jwt.encode(payload, private_key, algorithm=algorithm)
 
 class MyServer(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/auth":
-            expired = "expired" in self.path
-            if expired:
-                token = sign_jwt({"user": "username", "exp": int(time.time()) - 1}, "secret")
-            else:
-                token = sign_jwt({"user": "username", "exp": int(time.time()) + 3600}, "secret")
+            token = sign_jwt({"user": "username", "exp": int(time.time()) + 3600}, kid=1)  # Use kid=1 for valid key
 
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(bytes(token, "utf-8"))
+            self.wfile.write(bytes(json.dumps({"token": token}), "utf-8"))
             return
 
         self.send_response(404)
@@ -102,7 +108,7 @@ class MyServer(BaseHTTPRequestHandler):
                     "alg": "RS256",
                     "kty": "RSA",
                     "use": "sig",
-                    "kid": str(exp),
+                    "kid": str(exp),  # Use expiration as kid (make sure this matches)
                     "n": int_to_base64(numbers.n),
                     "e": int_to_base64(numbers.e),
                 })
