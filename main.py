@@ -20,11 +20,12 @@ def create_table():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS keys (
                 kid INTEGER PRIMARY KEY AUTOINCREMENT,
-                key TEXT NOT NULL,
+                key TEXT NOT NULL,  -- Store as TEXT (PEM string)
                 exp INTEGER NOT NULL
             )
         ''')
         conn.commit()
+
 
 def generate_and_store_key(expiry):
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -49,11 +50,11 @@ def setup_keys():
 
 def retrieve_key(expired=False):
     now = int(time.time())
-    query = "SELECT key FROM keys WHERE exp > ? ORDER BY exp DESC LIMIT 1"
+    query = "SELECT key, kid FROM keys WHERE exp > ? ORDER BY exp DESC LIMIT 1"
     params = (now,)
 
     if expired:
-        query = "SELECT key FROM keys WHERE exp <= ? ORDER BY exp DESC LIMIT 1"
+        query = "SELECT key, kid FROM keys WHERE exp <= ? ORDER BY exp DESC LIMIT 1"
         params = (now,)
 
     with connect_to_db() as conn:
@@ -63,9 +64,11 @@ def retrieve_key(expired=False):
         
     if key_row is None:
         raise Exception("No matching key found")
-    
+
+    # Convert PEM string back to private key object
     pem_private_key = key_row[0].encode('utf-8')
-    return serialization.load_pem_private_key(pem_private_key, password=None, backend=default_backend())
+    kid = key_row[1]  # Assuming kid is stored as a separate column
+    return serialization.load_pem_private_key(pem_private_key, password=None, backend=default_backend()), kid
 
 def sign_jwt(payload, private_key, kid):
     return jwt.encode(payload, private_key, algorithm="RS256", headers={"kid": kid})
@@ -102,18 +105,21 @@ def create_app():
     app = Flask(__name__)
 
     @app.route('/auth', methods=['POST'])
+    @app.route('/auth', methods=['POST'])
     def auth():
         try:
             expired = request.args.get('expired', 'false').lower() == 'true'
-            private_key = retrieve_key(expired=expired)
-            
+            private_key, kid = retrieve_key(expired=expired)
+
             payload = {"user": "username", "exp": int(time.time()) + 3600}
-            kid = "my_unique_key_id"  # Replace with actual kid if needed
-            token = sign_jwt(payload, private_key, kid)
-            
-            return jsonify({"token": token}), 200
+            # Ensure kid is in string format
+            token = sign_jwt(payload, private_key, str(kid))
+
+            return jsonify({"token": token}), 200  # Return token in the response
         except Exception as e:
             return jsonify({"error": str(e)}), 400
+
+
 
     @app.route('/.well-known/jwks.json', methods=['GET'])
     def jwks():
